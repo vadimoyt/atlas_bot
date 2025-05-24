@@ -42,7 +42,6 @@ def check_free_seats(url, chat_id):
         bot.send_message(chat_id, "Ошибка: не удалось распарсить JSON от сервера.")
         return None
 
-    # Проверяем, является ли `data` списком, если да — используем его, если нет — ищем 'rides'
     rides_list = data if isinstance(data, list) else data.get('rides', [])
 
     if not rides_list:
