@@ -30,53 +30,93 @@ def generate_url(from_city, to_city, passengers, date, time):
     if not from_id or not to_id:
         return None
 
-    return f'https://atlasbus.by/api/search?from_id={from_id}&to_id={to_id}&date={date}&time={time}:00&passengers={passengers}'
+    return f'https://atlasbus.by/api/search?from_id={from_id}&to_id={to_id}&date={date}&time={time}&passengers={passengers}'
+
 
 
 def check_free_seats(url, chat_id):
-    x = requests.get(url)
-
     try:
-        data = x.json()
+        response = requests.get(url)
+        data = response.json()
     except ValueError:
-        bot.send_message(chat_id, "Ошибка: не удалось распарсить JSON от сервера.")
+        bot.send_message(chat_id, f"Ошибка: не удалось распарсить JSON.\nОтвет: {response.text}")
+        return None
+    except requests.RequestException as e:
+        bot.send_message(chat_id, f"Ошибка запроса к API: {e}")
         return None
 
-    rides_list = data if isinstance(data, list) else data.get('rides', [])
-
+    rides_list = data.get('rides', [])
     if not rides_list:
-        bot.send_message(chat_id, "Нет доступных рейсов или изменился формат данных.")
         return None
 
-    user_time = tracking_users.get(chat_id, {}).get('time')
+    schedule = tracking_users.get(chat_id, {}).get('schedule', [])
+    for ride in rides_list:
+        departure_time = ride['rideStops']['Минск'][0]['datetime'][11:16]
+        arrival_time = ride['rideStops']['Дятлово'][0]['datetime'][11:16]
+        free_seats = ride.get('freeSeats', 0)
+        price = ride.get('onlinePrice', 'не указано')
 
-    for rides in rides_list:
-        out_time = rides.get('departure')
-        arrival_time = rides.get('arrival')
-        free_seats = rides.get('freeSeats')
-        price = rides.get('price')
-
-        if free_seats and user_time == out_time:
-            return f"Время отправления: {out_time}\nВремя прибытия: {arrival_time}\nКоличество свободных мест: {free_seats}\nЦена билета: {price}"
-
+        for entry in schedule:
+            if entry['time'] == departure_time:
+                return (
+                    f"Время отправления: {departure_time}\n"
+                    f"Время прибытия: {arrival_time}\n"
+                    f"Количество свободных мест: {free_seats}\n"
+                    f"Цена билета: {price}"
+                )
     return None
 
 
-def monitor(url, chat_id):
-    while chat_id in monitoring_threads:
-        free_seat_info = check_free_seats(url, chat_id)
-        if free_seat_info:
-            bot.send_message(chat_id, free_seat_info)
-            del monitoring_threads[chat_id]  # Остановка мониторинга
-            break
+
+
+def monitor(chat_id):
+    user_data = tracking_users[chat_id]
+    schedule = user_data.get('schedule', [])
+
+    while chat_id in monitoring_threads and schedule:
+        for entry in schedule[:]:  # [:] чтобы можно было удалять проверенные
+            date = entry['date']
+            time_ = entry['time']
+            url = generate_url(user_data['from_city'], user_data['to_city'], user_data['passengers'], date, time_)
+            free_seat_info = check_free_seats(url, chat_id)
+            if free_seat_info:
+                bot.send_message(chat_id, free_seat_info)
+                schedule.remove(entry)  # удаляем проверенный рейс
         time.sleep(60)
+
+
+def choose_time(message):
+    try:
+        datetime.strptime(message.text, '%H:%M')
+        chat_id = message.chat.id
+        date = tracking_users[chat_id]['current_date']
+
+        user_schedule = tracking_users[chat_id].setdefault('schedule', [])
+        user_schedule.append({'date': date, 'time': message.text})
+
+        # создаем клавиатуру с кнопками "Добавить ещё" и "Готово"
+        markup = types.ReplyKeyboardMarkup(row_width=2, one_time_keyboard=True)
+        markup.add('Добавить ещё', 'Готово')
+        bot.send_message(chat_id, f"Дата и время добавлены: {date} {message.text}\nВыберите действие:", reply_markup=markup)
+
+    except ValueError:
+        bot.send_message(chat_id, 'Неверный формат времени. Используйте ЧЧ:ММ.')
 
 
 @bot.message_handler(commands=['start'])
 def send_welcome_message(message):
+    chat_id = message.chat.id
+
+    # Очистка старого состояния и остановка мониторинга
+    if chat_id in monitoring_threads:
+        del monitoring_threads[chat_id]
+    if chat_id in tracking_users:
+        del tracking_users[chat_id]
+
     markup = types.ReplyKeyboardMarkup(row_width=2, one_time_keyboard=True)
     markup.add(*cities.keys())
-    bot.send_message(message.chat.id, 'Привет! Выберите город отправления:', reply_markup=markup)
+    bot.send_message(chat_id, 'Привет! Выберите город отправления:', reply_markup=markup)
+
 
 
 @bot.message_handler(
@@ -111,32 +151,27 @@ def choose_passengers(message):
 def choose_date(message):
     try:
         date = datetime.strptime(message.text, '%Y-%m-%d').strftime('%Y-%m-%d')
-        tracking_users[message.chat.id]['date'] = date
+        tracking_users[message.chat.id]['current_date'] = date  # сохраняем временно
         bot.send_message(message.chat.id, 'Введите время отправления (ЧЧ:ММ):')
         bot.register_next_step_handler(message, choose_time)
     except ValueError:
         bot.send_message(message.chat.id, 'Неверный формат даты. Используйте ГГГГ-ММ-ДД.')
 
 
-def choose_time(message):
-    try:
-        datetime.strptime(message.text, '%H:%M')
-        tracking_users[message.chat.id]['time'] = message.text
 
-        user_data = tracking_users[message.chat.id]
-        url = generate_url(user_data['from_city'], user_data['to_city'], user_data['passengers'], user_data['date'],
-                           user_data['time'])
 
-        if url:
-            bot.send_message(message.chat.id, 'Начинаем отслеживание свободных мест...')
-            monitoring_thread = threading.Thread(target=monitor, args=(url, message.chat.id))
-            monitoring_threads[message.chat.id] = monitoring_thread
+@bot.message_handler(func=lambda message: message.text in ['Добавить ещё', 'Готово'])
+def add_or_finish(message):
+    chat_id = message.chat.id
+    if message.text == 'Добавить ещё':
+        bot.send_message(chat_id, 'Введите дату отправления (ГГГГ-ММ-ДД):')
+        bot.register_next_step_handler(message, choose_date)
+    else:  # 'Готово'
+        if chat_id not in monitoring_threads:
+            monitoring_thread = threading.Thread(target=monitor, args=(chat_id,))
+            monitoring_threads[chat_id] = monitoring_thread
             monitoring_thread.start()
-        else:
-            bot.send_message(message.chat.id, 'Ошибка при формировании запроса.')
-
-    except ValueError:
-        bot.send_message(message.chat.id, 'Неверный формат времени. Используйте ЧЧ:ММ.')
+        bot.send_message(chat_id, '✅ Мониторинг запущен.')
 
 
 @bot.message_handler(commands=['stop'])
