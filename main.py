@@ -160,6 +160,7 @@ def choose_date(message):
 
 
 
+
 @bot.message_handler(func=lambda message: message.text in ['Добавить ещё', 'Готово'])
 def add_or_finish(message):
     chat_id = message.chat.id
@@ -184,4 +185,16 @@ def stop_tracking(message):
         bot.send_message(chat_id, "❌ Нет активного отслеживания.")
 
 
-bot.polling(non_stop=True)
+if __name__ == "__main__":
+    while True:
+        try:
+            print("🚀 Bot polling started")
+            bot.polling(
+                non_stop=True,
+                interval=3,
+                timeout=20,
+                long_polling_timeout=60
+            )
+        except Exception as e:
+            print(f"⚠️ Polling crashed: {e}")
+            time.sleep(5)
